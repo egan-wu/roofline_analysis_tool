@@ -1,0 +1,160 @@
+[
+    {
+        "type": "ID_CONV",
+        "name": "#1",
+        "data_type": "INT8",
+        "input_shape": [
+            1,
+            64,
+            1,
+            224,
+            224
+        ],
+        "output_channels": 128,
+        "kernel_size": [
+            1,
+            3,
+            3
+        ],
+        "stride": [
+            1,
+            2,
+            2
+        ],
+        "padding": [
+            0,
+            1,
+            1
+        ],
+        "time_us": 850.0
+    },
+    {
+        "type": "ID_MM",
+        "name": "#2",
+        "data_type": "FP16",
+        "input_mat1": [
+            1,
+            1,
+            1,
+            512,
+            1024
+        ],
+        "input_mat2": [
+            1,
+            1,
+            1,
+            1024,
+            512
+        ],
+        "time_us": 320.0
+    },
+    {
+        "type": "ID_MM",
+        "name": "#3",
+        "data_type": "FP16",
+        "input_mat1": [
+            1,
+            1,
+            1,
+            512,
+            1024
+        ],
+        "input_mat2": [
+            1,
+            1,
+            1,
+            1024,
+            512
+        ],
+        "time_us": 120.0
+    },
+    {
+        "type": "ID_MM",
+        "name": "#4",
+        "data_type": "FP16",
+        "input_mat1": [
+            1,
+            1,
+            1,
+            512,
+            1024
+        ],
+        "input_mat2": [
+            1,
+            1,
+            1,
+            1024,
+            512
+        ],
+        "time_us": 60.0
+    },
+    {
+        "type": "ID_CONV",
+        "name": "#5",
+        "data_type": "INT8",
+        "input_shape": [
+            1,
+            512,
+            1,
+            32,
+            32
+        ],
+        "output_channels": 512,
+        "kernel_size": [
+            1,
+            3,
+            3
+        ],
+        "stride": [
+            1,
+            1,
+            1
+        ],
+        "padding": [
+            0,
+            1,
+            1
+        ],
+        "time_us": 75.5
+    },
+    {
+        "type": "ID_MM",
+        "name": "#6",
+        "data_type": "FP16",
+        "input_mat1": [
+            1,
+            1,
+            1,
+            2048,
+            4096
+        ],
+        "input_mat2": [
+            1,
+            1,
+            1,
+            4096,
+            14336
+        ],
+        "time_us": 3760.0
+    },
+    {
+        "type": "ID_MM",
+        "name": "#7",
+        "data_type": "FP8",
+        "input_mat1": [
+            1,
+            1,
+            1,
+            2048,
+            4096
+        ],
+        "input_mat2": [
+            1,
+            1,
+            1,
+            4096,
+            14336
+        ],
+        "time_us": 3760.0
+    }
+]
