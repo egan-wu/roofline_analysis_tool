@@ -10,6 +10,16 @@ ERR_SYMBOL   = "star"
 def get_custom_metrics(cmd, dt_size):
     ctype = cmd.get('type')
     
+    '''
+        Example of adding a custom operator:
+    
+        if ctype == "ID_CUSTOM_OP":
+            tensorA, tensorB = cmd['name_of_tensor_A'], cmd['name_of_tensor_B']
+            macs = np.prod(tensorA) * np.prod(tensorB)                          # this is the calculation of MACs
+            bytes_moved = (np.prod(tensorA) + np.prod(tensorB)) * dt_size       # this is the calculation of bytes moved
+            return macs, bytes_moved, OTHER_SYMBOL
+    '''
+
     if ctype == "ID_MUL":
         m1, m2 = cmd['input_self'], cmd['input_other']
         macs = np.prod(m1)
