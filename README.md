@@ -6,7 +6,9 @@ A powerful, interactive visualization tool built with **Dash** and **Plotly** to
 
 - **Interactive Roofline Chart**: Zoom, pan, and hover over operations to see detailed metrics.
 - **Real-time Configuration**: Adjust hardware parameters (Peak TOPS, Memory Bandwidth) and efficiency thresholds on the fly.
-- **Diagnostic Panel**: Click on any node to view detailed statistics (MACs, Bytes, Utilization, Bandwidth).
+- **Plugin System**: extensible operation support via `op_registry.py`.
+- **Diagnostic Panel**: Click on any node to view detailed statistics (MACs, Bytes, Utilization, Bandwidth) with clear definitions.
+- **Category Filter**: Filter operations by efficiency status (Compute Bound, Memory Inefficient, etc.).
 - **Auto-Reload**: Automatically detects and reloads changes in `commands.json`.
 - **Config Persistence**: Saves your hardware settings to `roofline_config.json`.
 
@@ -14,6 +16,7 @@ A powerful, interactive visualization tool built with **Dash** and **Plotly** to
 
 - `roofline_analysis_tool.py`: The main application script (Dash app).
 - `commands.json`: Input data file containing the list of operations to analyze.
+- `op_registry.py`: External plugin file for defining custom metrics (MACs, Bytes) and display symbols.
 - `roofline_config.json`: user configuration file for hardware specs (auto-generated).
 
 ## 🛠️ Installation & Requirements
@@ -51,23 +54,42 @@ The tool reads a JSON file (`commands.json`) containing a list of operations. Ea
         "kernel_size": [1, 3, 3],
         "stride": [1, 2, 2],
         "padding": [0, 1, 1],
-        "time_us": 850.0
+        "time_ns": 850000.0
     },
     {
-        "type": "ID_MM",
+        "type": "ID_MUL",
         "name": "#2",
-        "data_type": "FP16",
-        "input_mat1": [1, 1, 1, 512, 1024],
-        "input_mat2": [1, 1, 1, 1024, 512],
-        "time_us": 320.0
+        "data_type": "FP32",
+        "input_self": [1, 1, 1, 1, 2048],
+        "input_other": [1, 1, 1, 1, 2048],
+        "time_ns": 2100.0
     }
 ]
 ```
 
 ### Supported Types:
-- **ID_CONV**: Convolution operations (requires `input_shape`, `kernel_size`, `stride`, etc.)
-- **ID_MM**: Matrix Multiplication (requires `input_mat1`, `input_mat2`)
-- **Generic**: Other operations (fallback calculation based on `input_shape`)
+- **Built-in**: `ID_CONV` (Convolution), `ID_MM` (Matrix Mult), etc. can be customized in `op_registry.py`.
+- **Custom**: Any type (e.g., `ID_MUL`, `ID_ADDMM`) can be supported by adding logic to `get_custom_metrics` in `op_registry.py`.
+
+## 🔌 Plugin System (`op_registry.py`)
+
+The tool supports a flexible plugin system to define how MACs and Bytes are calculated for different operation types.
+
+**How to extend:**
+1. Open `op_registry.py`.
+2. Add a new conditions in `get_custom_metrics(cmd, dt_size)`.
+3. Return `(macs, bytes, symbol)` where symbol can be one of:
+    - `"circle"`, `"square"`, `"diamond"`, `"cross"`, `"x"`, `"triangle-up"`, etc. (Plotly symbols)
+
+**Example:**
+
+```python
+elif ctype == "ID_MY_OP":
+    # Custom logic to calculate macs and bytes
+    macs = ...
+    bytes_moved = ...
+    return macs, bytes_moved, "diamond"
+```
 
 ## ⚙️ Configuration
 
@@ -84,6 +106,8 @@ The tool allows you to configure the following parameters via the UI (or `roofli
 - **Red Nodes**: **Inefficient** (Bad). The operation is significantly below the roofline boundary, indicating software or architectural bottlenecks.
 - **Blue Nodes**: **Normal**. Operations falling between the efficiency thresholds.
 - **Shapes**:
-    - 🟥 Square: Convolution (`ID_CONV`)
+    - 🟦 Square: Convolution (`ID_CONV`)
     - 🔵 Circle: Matrix Mult (`ID_MM`)
-    - 🔺 Triangle: Other
+    - 🔺 Triangle: Element-wise (`ID_MUL`)
+    - 🔷 Diamond: Other/Generic
+    - ⭐ Star: Error/Unknown
