@@ -66,7 +66,7 @@ def calculate_metrics(raw_data, peak_tops, mem_bw, mem_thresh, comp_thresh):
         if custom_res:
             macs, bytes_moved, symbol = custom_res
         else:
-            # You can keep the original ID_CONV / ID_MM fallback, or continue as shown
+            print("Warning: No plugin found for command: ", cmd)
             continue
 
         ai = macs / bytes_moved
@@ -194,9 +194,30 @@ def update_chart(data, tops, bw, selected_statuses):
 
 @app.callback(Output('detail-panel', 'children'), [Input('roofline-chart', 'clickData'), State('processed-df-store', 'data')])
 def show_detail(click, data):
-    if not click or not data: return [html.H3("Diagnostic Panel"), html.P("Please click on a dot in the chart to view details.")]
+    # Definition Block
+    definition_block = html.Div(style={'marginTop': '30px', 'padding': '15px', 'background': '#f8f9fa', 'borderRadius': '8px', 'border': '1px solid #ddd'}, children=[
+        html.H4("📘 Diagnostic Definitions", style={'marginTop': '0px'}),
+        html.Div(style={'fontSize': '13px', 'lineHeight': '1.6'}, children=[
+            html.P([html.B("1. Turning Point (AI*): "), "Peak TOPS / Peak Bandwidth. The boundary between Memory and Compute bound regions."]),
+            html.Ul([
+                html.Li([html.B("Compute Bound (🟢): "), "In the plateau region with >70% utilization. PE array is fully utilized."]),
+                html.Li([html.B("Memory Bound (🟢): "), "In the slope region with >70% utilization. DMA bandwidth is saturated."]),
+                html.Li([html.B("Compute Inefficient (🔴): "), "In the plateau but below threshold. Usually caused by small op dimensions or poor tiling."]),
+                html.Li([html.B("Memory Inefficient (🔴): "), "In the slope but below threshold. Caused by misalignment, large strides, or small DMA bursts."]),
+            ]),
+            html.Hr(style={'margin': '10px 0'}),
+            html.B("💡 Calculation Formulas:"),
+            html.Ul([
+                html.Li("Intensity (AI) = MACs / Total Bytes Moved"),
+                html.Li("Utilization = Actual TOPS / Theoretical Max at given AI"),
+                html.Li("Actual BW = Bytes Moved / Execution Time")
+            ])
+        ])
+    ])
+
+    if not click or not data: 
+        return [html.H3("Diagnostic Panel"), html.P("Click a node in the chart to view metrics."), definition_block]
     
-    # Note: customdata here points to the index of processed-df-store, so use the full df
     df_full = pd.DataFrame(data)
     idx = int(click['points'][0]['customdata'])
     row = df_full.iloc[idx]
@@ -221,7 +242,8 @@ def show_detail(click, data):
         ], style={'width': '100%', 'lineHeight': '1.8', 'fontSize': '14px', 'color': '#555'}),
         html.Hr(),
         html.B("📄 Raw Config:"),
-        html.Pre(json.dumps(row['raw'], indent=2), style={'background': '#2d3436', 'color': '#eee', 'padding': '10px', 'fontSize': '11px', 'marginTop': '15px'})
+        html.Pre(json.dumps(row['raw'], indent=2), style={'background': '#2d3436', 'color': '#eee', 'padding': '10px', 'fontSize': '11px', 'marginTop': '15px'}),
+        definition_block
     ]
 
 # Save Config Callback
