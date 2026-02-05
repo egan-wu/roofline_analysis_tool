@@ -2,7 +2,7 @@
     {
         "type": "ID_CONV",
         "name": "#1",
-        "data_type": "INT8",
+        "data_type": "FP32",
         "input_shape": [
             1,
             64,
@@ -26,135 +26,100 @@
             1,
             1
         ],
-        "time_us": 850.0
+        "time_ns": 850.0
     },
     {
-        "type": "ID_MM",
+        "type": "ID_MUL",
         "name": "#2",
-        "data_type": "FP16",
-        "input_mat1": [
+        "data_type": "FP32",
+        "input_self": [
             1,
             1,
             1,
-            512,
-            1024
+            1,
+            2048
         ],
-        "input_mat2": [
+        "input_other": [
             1,
             1,
             1,
-            1024,
-            512
+            1,
+            2048
         ],
-        "time_us": 320.0
+        "time_ns": 2154.0
     },
     {
-        "type": "ID_MM",
+        "type": "ID_MUL",
         "name": "#3",
-        "data_type": "FP16",
-        "input_mat1": [
+        "data_type": "FP32",
+        "input_self": [
             1,
             1,
             1,
-            512,
-            1024
+            1,
+            2048
         ],
-        "input_mat2": [
+        "input_other": [
             1,
             1,
             1,
-            1024,
-            512
+            1,
+            2048
         ],
-        "time_us": 120.0
+        "time_ns": 2302.0
     },
     {
-        "type": "ID_MM",
+        "type": "ID_ADDMM",
         "name": "#4",
-        "data_type": "FP16",
+        "data_type": "FP32",
+        "input_input": [
+            1,
+            1,
+            1,
+            1,
+            2048
+        ],
         "input_mat1": [
             1,
             1,
             1,
-            512,
-            1024
+            1,
+            2048
         ],
         "input_mat2": [
-            1,
-            1,
-            1,
-            1024,
-            512
-        ],
-        "time_us": 60.0
-    },
-    {
-        "type": "ID_CONV",
-        "name": "#5",
-        "data_type": "INT8",
-        "input_shape": [
-            1,
-            512,
-            1,
-            32,
-            32
-        ],
-        "output_channels": 512,
-        "kernel_size": [
-            1,
-            3,
-            3
-        ],
-        "stride": [
-            1,
-            1,
-            1
-        ],
-        "padding": [
-            0,
-            1,
-            1
-        ],
-        "time_us": 75.5
-    },
-    {
-        "type": "ID_MM",
-        "name": "#6",
-        "data_type": "FP16",
-        "input_mat1": [
             1,
             1,
             1,
             2048,
-            4096
+            2048
         ],
-        "input_mat2": [
-            1,
-            1,
-            1,
-            4096,
-            14336
-        ],
-        "time_us": 3760.0
+        "time_ns": 707298.0
     },
     {
-        "type": "ID_MM",
-        "name": "#7",
-        "data_type": "FP8",
+        "type": "ID_ADDMM",
+        "name": "#29",
+        "data_type": "FP32",
+        "input_input": [
+            1,
+            1,
+            1,
+            1,
+            2048
+        ],
         "input_mat1": [
             1,
             1,
             1,
-            2048,
-            4096
+            1,
+            8192
         ],
         "input_mat2": [
             1,
             1,
             1,
-            4096,
-            14336
+            8192,
+            2048
         ],
-        "time_us": 3760.0
+        "time_ns": 1994621.0
     }
 ]
