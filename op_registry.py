@@ -45,7 +45,7 @@ def get_custom_metrics(cmd, dt_size):
         
         do, ho, wo = (d+2*p_d-kd)//sd+1, (h+2*ph-kh)//sh+1, (w+2*pw-kw)//sw+1
         macs = n * co * do * ho * wo * (ci * kd * kh * kw)
-        bytes_moved = (n*ci*d*h*w + co*ci*kd*kh*kw + n*co*do*ho*wo) * dt_size
+        bytes_moved = (n*ci*d*h*w) * dt_size
         return macs, bytes_moved, CONV_SYMBOL
 
     # Let this be the last resort

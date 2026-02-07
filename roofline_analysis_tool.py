@@ -2,11 +2,13 @@ import json
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, dcc, html, Input, Output, State
+from dash import Dash, dcc, html, Input, Output, State, ctx, no_update
 import datetime
 import os
 import sys
 import webbrowser
+import base64
+import io
 from threading import Timer
 import importlib.util
 
@@ -17,7 +19,7 @@ def get_base_path():
     return os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_FILE = os.path.join(get_base_path(), 'roofline_config.json')
-DATA_FILE = os.path.join(get_base_path(), 'commands.json')
+DEFAULT_FILENAME = 'commands.json' 
 PLUGIN_FILE = os.path.join(get_base_path(), 'op_registry.py')
 
 # --- 2. Core Settings ---
@@ -62,29 +64,62 @@ def calculate_metrics(raw_data, peak_tops, mem_bw, mem_thresh, comp_thresh):
     for i, cmd in enumerate(raw_data):
         dt_size = DT_MAP.get(cmd.get('data_type', "INT8"), 1)
         
+        # 1. Get Theoretical (Golden) Metrics from Registry
         custom_res = get_metrics_from_plugin(cmd, dt_size)
         if custom_res:
-            macs, bytes_moved, symbol = custom_res
+            theo_macs, theo_bytes, symbol = custom_res
         else:
-            print("Warning: No plugin found for command: ", cmd)
             continue
 
-        ai = macs / bytes_moved
-        # Use time_ns as requested
+        # 2. Get Real HW Metrics (fallback to theo if missing)
+        real_bytes = cmd.get('hw_bytes', theo_bytes) 
         time_sec = cmd['time_ns'] / 1e9
-        perf = (macs / time_sec) / 1e12
-        util = (perf / min(peak_tops, (mem_bw * ai) / 1000)) * 100
-        actual_bw = (bytes_moved / time_sec) / 1e9
 
-        if ai >= turning_point:
-            status = "Compute Bound" if util > 70 else ("Compute Inefficient" if util < comp_thresh else "Normal")
+        # 3. Calculate Two Intensities
+        ai_algo = theo_macs / theo_bytes if theo_bytes > 0 else 0 
+        ai_real = theo_macs / real_bytes if real_bytes > 0 else 0 
+
+        # Performance is based on Real Time but Theo Work (Effective Throughput)
+        perf = (theo_macs / time_sec) / 1e12
+        
+        # 4. Calculate Efficiency Metrics
+        data_efficiency = (theo_bytes / real_bytes) * 100 if real_bytes > 0 else 0
+        actual_bw_used = (real_bytes / time_sec) / 1e9
+        bw_efficiency = (actual_bw_used / mem_bw) * 100 if mem_bw > 0 else 0
+        
+        # Utilization calculation (Local Util against Ceiling)
+        roofline_ceiling = min(peak_tops, (mem_bw * ai_real) / 1000)
+        util = (perf / roofline_ceiling) * 100 if roofline_ceiling > 0 else 0
+        
+        # Global Util for status check logic
+        global_util = (perf / peak_tops) * 100
+
+        # Determine status based on REAL behavior
+        if ai_real >= turning_point:
+            status = "Compute Bound" if global_util > 70 else ("Compute Inefficient" if global_util < comp_thresh else "Normal")
         else:
-            status = "Memory Bound" if util > 70 else ("Memory Inefficient" if actual_bw < (mem_bw * mem_thresh / 100) else "Normal")
+            status = "Memory Bound" if global_util > 70 else ("Memory Inefficient" if actual_bw_used < (mem_bw * mem_thresh / 100) else "Normal")
 
         processed.append({
-            "name": cmd.get('name', f"#{i}"), "type": cmd['type'], "ai": ai, "perf": perf, "util": util,
-            "status": status, "status_color": COLOR_MAP[status], "symbol": symbol,
-            "actual_bw": actual_bw, "macs": macs, "bytes": bytes_moved, "raw": cmd
+            "id": i, 
+            "name": cmd.get('name', f"#{i}"), 
+            "type": cmd['type'], 
+            "label": f"{cmd.get('name', f'#{i}')} ({cmd['type']})", 
+            "ai_real": ai_real,      
+            "ai_algo": ai_algo,      
+            "perf": perf,            
+            "util": util, 
+            "data_eff": data_efficiency,
+            "bw_eff": bw_efficiency,
+            "status": status, 
+            "status_color": COLOR_MAP[status], 
+            "symbol": symbol,
+            "actual_bw": actual_bw_used, 
+            "theo_macs": theo_macs, 
+            "theo_bytes": theo_bytes,
+            "real_bytes": real_bytes,
+            "real_ceiling": roofline_ceiling, 
+            "raw": cmd
         })
     return pd.DataFrame(processed)
 
@@ -92,37 +127,77 @@ def calculate_metrics(raw_data, peak_tops, mem_bw, mem_thresh, comp_thresh):
 app = Dash(__name__)
 current_cfg = load_config()
 
-app.layout = html.Div(style={'display': 'flex', 'height': '100vh', 'fontFamily': 'Segoe UI, Arial'}, children=[
-    dcc.Store(id='raw-json-store'), dcc.Store(id='processed-df-store'),
+app.layout = html.Div(style={'display': 'flex', 'height': '100vh', 'fontFamily': 'Segoe UI, Arial', 'overflow': 'hidden'}, children=[
+    dcc.Store(id='raw-json-store'), 
+    dcc.Store(id='processed-df-store'),
+    # Store to track which file is currently active
+    dcc.Store(id='active-filename-store', data=DEFAULT_FILENAME), 
     
-    # Left Control Area and Chart
-    html.Div(style={'flex': '75', 'padding': '20px', 'display': 'flex', 'flexDirection': 'column'}, children=[
+    # --- PANEL 1: Node Filter Sidebar (Left, 20%) ---
+    html.Div(style={'flex': '15', 'minWidth': '200px', 'maxWidth': '20%', 'background': '#f8f9fa', 'borderRight': '1px solid #ddd', 'display': 'flex', 'flexDirection': 'column'}, children=[
+        html.Div(style={'padding': '15px', 'borderBottom': '1px solid #ddd', 'background': '#fff'}, children=[
+            html.H3("🔍 Search", style={'margin': '0 0 10px 0', 'fontSize': '16px'}),
+            dcc.Input(id='node-search', type='text', placeholder='Filter by name...', style={'width': '100%', 'padding': '5px', 'boxSizing': 'border-box', 'marginBottom': '10px'}),
+            html.Div(style={'display': 'flex', 'gap': '5px'}, children=[
+                html.Button("Select All", id='btn-select-all', n_clicks=0, style={'flex': 1, 'fontSize': '11px', 'padding': '4px'}),
+                html.Button("Clear All", id='btn-clear-all', n_clicks=0, style={'flex': 1, 'fontSize': '11px', 'padding': '4px'}),
+            ])
+        ]),
+        # Scrollable Checklist Area
+        html.Div(style={'flex': '1', 'overflowY': 'auto', 'padding': '10px'}, children=[
+            dcc.Checklist(
+                id='node-checklist',
+                options=[],
+                value=[],
+                style={'fontSize': '12px', 'lineHeight': '1.5'},
+                labelStyle={'display': 'block', 'marginBottom': '4px', 'cursor': 'pointer', 'whiteSpace': 'nowrap', 'overflow': 'hidden', 'textOverflow': 'ellipsis'}
+            )
+        ])
+    ]),
+
+    # --- PANEL 2: Main Chart & Controls (Middle, 55%) ---
+    html.Div(style={'flex': '60', 'padding': '20px', 'display': 'flex', 'flexDirection': 'column', 'borderRight': '1px solid #ddd'}, children=[
+        # Controls Header
         html.Div(style={'background': '#f1f3f4', 'padding': '15px', 'borderRadius': '8px', 'marginBottom': '10px'}, children=[
-            html.Div(style={'display': 'flex', 'gap': '15px', 'alignItems': 'center', 'flexWrap': 'wrap'}, children=[
-                html.Div([html.B("Peak TOPS: "), dcc.Input(id='tops-input', type='number', value=current_cfg['peak_tops'], style={'width': '60px'})]),
-                html.Div([html.B("BW (GB/s): "), dcc.Input(id='bw-input', type='number', value=current_cfg['mem_bw'], style={'width': '60px'})]),
-                html.Button('🔄 Reload JSON', id='reload-btn', n_clicks=0),
+            html.Div(style={'display': 'flex', 'gap': '10px', 'alignItems': 'center', 'flexWrap': 'wrap'}, children=[
+                html.Div([html.B("TOPS: "), dcc.Input(id='tops-input', type='number', value=current_cfg['peak_tops'], style={'width': '50px'})]),
+                html.Div([html.B("BW: "), dcc.Input(id='bw-input', type='number', value=current_cfg['mem_bw'], style={'width': '50px'})]),
+                
+                # --- RELOAD (Resets to Default) ---
+                html.Button('🔄 Reload', id='reload-btn', n_clicks=0, style={'background': '#e8f0fe'}),
+
+                # --- UPLOAD (Loads New File) ---
+                dcc.Upload(
+                    id='upload-data',
+                    children=html.Button('📂 Open', style={'background': '#e8f0fe'}),
+                    multiple=False,
+                    style={'display': 'inline-block'}
+                ),
+                
                 html.Button('💾 Save Config', id='save-config-btn', n_clicks=0, style={'background': '#e8f0fe'}),
-                html.Span(id='config-status', style={'fontSize': '12px', 'color': '#4285f4'})
+                html.Span(id='config-status', style={'fontSize': '12px', 'color': '#4285f4', 'marginLeft': '10px', 'whiteSpace': 'nowrap'})
             ]),
             
             # Threshold Sliders
-            html.Div(style={'display': 'flex', 'gap': '30px', 'marginTop': '15px'}, children=[
-                html.Div([html.Label("Memory Inefficient Threshold (%)"), dcc.Slider(0,100,5, value=current_cfg['mem_thresh'], id='mem-thresh-slider')], style={'flex': 1}),
-                html.Div([html.Label("Compute Inefficient Threshold (%)"), dcc.Slider(0,100,5, value=current_cfg['comp_thresh'], id='comp-thresh-slider')], style={'flex': 1})
+            html.Div(style={'display': 'flex', 'gap': '20px', 'marginTop': '10px'}, children=[
+                html.Div([html.Label("Memory Thresh%"), dcc.Slider(0,100,5, value=current_cfg['mem_thresh'], id='mem-thresh-slider')], style={'flex': 1}),
+                html.Div([html.Label("Compute Thresh%"), dcc.Slider(0,100,5, value=current_cfg['comp_thresh'], id='comp-thresh-slider')], style={'flex': 1})
             ]),
 
-            # New: Status Filter Checkbox
-            html.Div(style={'marginTop': '15px', 'borderTop': '1px solid #ddd', 'paddingTop': '10px'}, children=[
-                html.B("Show Diagnostic Categories: "),
+            # Status Filter and Gap Toggle
+            html.Div(style={'marginTop': '10px', 'borderTop': '1px solid #ddd', 'paddingTop': '5px', 'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'fontSize': '12px'}, children=[
                 dcc.Checklist(
                     id='status-filter',
-                    options=[
-                        {'label': html.Span(f" {k}", style={'color': v, 'fontWeight': 'bold', 'marginRight': '15px'}), 'value': k}
-                        for k, v in COLOR_MAP.items()
-                    ],
-                    value=list(COLOR_MAP.keys()), # Select all by default
+                    options=[{'label': html.Span(f" {k}", style={'color': v, 'fontWeight': 'bold', 'marginRight': '5px'}), 'value': k} for k, v in COLOR_MAP.items()],
+                    value=list(COLOR_MAP.keys()),
                     inline=True
+                ),
+                dcc.Checklist(
+                    id='show-gap-toggle',
+                    options=[{'label': ' 📈 Show Efficiency Gap', 'value': 'SHOW_H'}],
+                    value=[],
+                    inline=True,
+                    style={'fontWeight': 'bold', 'color': '#e74c3c'}
                 )
             ])
         ]),
@@ -130,21 +205,74 @@ app.layout = html.Div(style={'display': 'flex', 'height': '100vh', 'fontFamily':
         dcc.Graph(id='roofline-chart', style={'flex-grow': '1'})
     ]),
     
-    # Right Detail Panel
-    html.Div(id='detail-panel', style={'flex': '25', 'padding': '25px', 'background': '#fdfdfd', 'borderLeft': '1px solid #eee', 'overflowY': 'auto'})
+    # --- PANEL 3: Detail Panel (Right, 25%) ---
+    html.Div(id='detail-panel', style={'flex': '25', 'padding': '20px', 'background': '#fdfdfd', 'overflowY': 'auto'})
 ])
 
 # --- 6. Callbacks ---
 
-@app.callback(
-    [Output('raw-json-store', 'data'), Output('detail-panel', 'children', allow_duplicate=True)], 
-    [Input('reload-btn', 'n_clicks')], prevent_initial_call='initial_duplicate'
-)
-def load_file(n):
-    if not os.path.exists(DATA_FILE): return None, html.P("❌ commands.json missing")
-    with open(DATA_FILE, 'r') as f: data = json.load(f)
-    return data, html.P(f"✅ Successfully loaded ({len(data)} commands).")
+# A. Helper Function for Bytes
+def format_bytes(size):
+    power = 2**10
+    n = 0
+    power_labels = {0 : '', 1: 'KB', 2: 'MB', 3: 'GB'}
+    while size > power:
+        size /= power
+        n += 1
+    return f"{size:.2f} {power_labels.get(n, 'TB')}"
 
+# B. MAIN FILE LOADER LOGIC (STATEFUL)
+@app.callback(
+    [Output('raw-json-store', 'data'), 
+     Output('config-status', 'children', allow_duplicate=True),
+     Output('active-filename-store', 'data')], 
+    [Input('upload-data', 'contents'), 
+     Input('upload-data', 'filename'), 
+     Input('reload-btn', 'n_clicks')],
+    [State('active-filename-store', 'data')], 
+    prevent_initial_call='initial_duplicate'
+)
+def manage_file_state(contents, uploaded_filename, reload_clicks, current_active_file):
+    trigger_id = ctx.triggered_id
+    
+    # 1. HANDLE OPEN/UPLOAD
+    if trigger_id == 'upload-data' and contents:
+        content_type, content_string = contents.split(',')
+        decoded = base64.b64decode(content_string)
+        try:
+            data = json.load(io.BytesIO(decoded))
+            msg = f"📂 Opened: {uploaded_filename} ({len(data)} nodes)"
+            return data, msg, uploaded_filename 
+        except Exception as e:
+            return no_update, f"❌ Error: {e}", current_active_file
+
+    # 2. HANDLE RELOAD or INITIALIZATION
+    target_file = current_active_file if current_active_file else DEFAULT_FILENAME
+    full_path = os.path.join(get_base_path(), target_file)
+    
+    if os.path.exists(full_path):
+        try:
+            with open(full_path, 'r') as f:
+                data = json.load(f)
+            msg = f"🔄 Reloaded: {target_file} ({len(data)} nodes)" if trigger_id == 'reload-btn' else f"✅ Loaded: {target_file}"
+            return data, msg, target_file
+        except Exception as e:
+             return no_update, f"❌ Error reading {target_file}", target_file
+    else:
+        if trigger_id == 'reload-btn':
+            return no_update, f"⚠️ Cannot reload {target_file} (File not found locally)", target_file
+        
+    return no_update, "⚠️ Ready", target_file
+
+# Trigger initial load
+@app.callback(
+    Output('upload-data', 'contents'),
+    Input('roofline-chart', 'id') 
+)
+def init_load(_):
+    return None 
+
+# C. Process Data
 @app.callback(
     Output('processed-df-store', 'data'), 
     [Input('raw-json-store', 'data'), Input('tops-input', 'value'), Input('bw-input', 'value'), 
@@ -154,113 +282,194 @@ def update_calcs(raw, t, b, mt, ct):
     if not raw: return None
     return calculate_metrics(raw, t, b, mt, ct).to_dict('records')
 
+# D. Update Node Checklist (Filter Logic)
+@app.callback(
+    [Output('node-checklist', 'options'), Output('node-checklist', 'value')],
+    [Input('processed-df-store', 'data'), 
+     Input('node-search', 'value'),
+     Input('btn-select-all', 'n_clicks'),
+     Input('btn-clear-all', 'n_clicks')],
+    [State('node-checklist', 'value')]
+)
+def update_node_list(data, search_term, btn_sel, btn_clr, current_selection):
+    if not data: return [], []
+    
+    df = pd.DataFrame(data)
+    options = [{'label': row['label'], 'value': row['id']} for _, row in df.iterrows()]
+    all_ids = df['id'].tolist() # <--- FIXED: Defined this variable here
+    
+    triggered_id = ctx.triggered_id if ctx.triggered_id else ""
+    
+    if triggered_id == 'btn-clear-all':
+        return options, []
+    if triggered_id == 'btn-select-all':
+        if search_term:
+            filtered_ids = [opt['value'] for opt in options if search_term.lower() in opt['label'].lower()]
+            new_selection = list(set((current_selection or []) + filtered_ids))
+            return options, new_selection
+        return options, all_ids
+        
+    if search_term:
+        options = [opt for opt in options if search_term.lower() in opt['label'].lower()]
+    
+    if triggered_id == 'processed-df-store':
+         return options, all_ids
+
+    return options, current_selection
+
+# E. Update Chart
 @app.callback(
     Output('roofline-chart', 'figure'), 
     [Input('processed-df-store', 'data'), Input('tops-input', 'value'), Input('bw-input', 'value'),
-     Input('status-filter', 'value')] # New filter input
+     Input('status-filter', 'value'), Input('show-gap-toggle', 'value'),
+     Input('node-checklist', 'value')]
 )
-def update_chart(data, tops, bw, selected_statuses):
+def update_chart(data, tops, bw, selected_statuses, show_gap, selected_node_ids):
     if not data: return go.Figure()
     
     df_all = pd.DataFrame(data)
-    # Filter data based on selected statuses
+    
+    # 1. Filter by Status
     df_curr = df_all[df_all['status'].isin(selected_statuses)]
+    
+    # 2. Filter by Node Checklist
+    if selected_node_ids is not None:
+        df_curr = df_curr[df_curr['id'].isin(selected_node_ids)]
     
     fig = go.Figure()
     xr = np.logspace(-2, 4, 1000)
     
-    # Draw Theoretical Roofline
+    # Draw Theoretical Roofline (Concrete Black Line)
     fig.add_trace(go.Scatter(
         x=xr, y=np.minimum(tops, (bw * xr) / 1000), 
-        mode='lines', line=dict(color='red', width=3), 
-        name='Theoretical Roofline', hoverinfo='skip'
+        mode='lines', line=dict(color='black', width=3), 
+        name='Roofline', hoverinfo='skip'
     ))
     
-    # Draw Data Points
+    # --- Efficiency Gap Lines (Horizontal Only - Red Dotted) ---
+    if 'SHOW_H' in show_gap and not df_curr.empty:
+        for _, row in df_curr.iterrows():
+            if abs(row['ai_algo'] - row['ai_real']) / (row['ai_algo'] + 1e-9) > 0.05:
+                # Line connecting Real to Ideal
+                fig.add_trace(go.Scatter(
+                    x=[row['ai_real'], row['ai_algo']],
+                    y=[row['perf'], row['perf']],
+                    mode='lines',
+                    line=dict(color='red', width=2, dash='dot'), # Red Dotted Line
+                    showlegend=False, hoverinfo='skip'
+                ))
+                # Ghost Point (Ideal)
+                fig.add_trace(go.Scatter(
+                    x=[row['ai_algo']], y=[row['perf']],
+                    mode='markers',
+                    marker=dict(size=6, color=row['status_color'], symbol='circle-open', opacity=0.5),
+                    showlegend=False,
+                    hovertext=f"Ideal AI: {row['ai_algo']:.2f}"
+                ))
+
+    # --- Draw Real Data Points ---
     if not df_curr.empty:
         fig.add_trace(go.Scatter(
-            x=df_curr['ai'], y=df_curr['perf'], 
-            mode='markers', 
-            marker=dict(size=18, color=df_curr['status_color'], symbol=df_curr['symbol'], line=dict(width=1, color='white')), 
-            customdata=df_curr.index.tolist(), 
-            hovertext=df_curr['name'],
-            name='Ops'
+            x=df_curr['ai_real'], y=df_curr['perf'], mode='markers', 
+            marker=dict(size=14, color=df_curr['status_color'], symbol=df_curr['symbol'], line=dict(width=1, color='white'), opacity=0.9), 
+            customdata=df_curr.index.tolist(), text=df_curr['label'],
+            hovertemplate="<b>%{text}</b><br>AI: %{x:.2f}<br>Perf: %{y:.2f} TOPS", name='Ops'
         ))
     
-    fig.update_xaxes(type="log", title="Arithmetic Intensity (MACs/Byte)", gridcolor='#eee')
+    fig.update_xaxes(type="log", title="Arithmetic Intensity", gridcolor='#eee')
     fig.update_yaxes(type="log", title="Performance (TOPS)", range=[-3.5, np.log10(tops*2)], gridcolor='#eee')
     fig.update_layout(template="plotly_white", margin=dict(l=60, r=20, t=10, b=60), clickmode='event+select')
     return fig
 
+# F. Show Detail Panel (Redesigned)
 @app.callback(Output('detail-panel', 'children'), [Input('roofline-chart', 'clickData'), State('processed-df-store', 'data')])
 def show_detail(click, data):
-    # Definition Block
-    definition_block = html.Div(style={'marginTop': '30px', 'padding': '15px', 'background': '#f8f9fa', 'borderRadius': '8px', 'border': '1px solid #ddd'}, children=[
-        html.H4("📘 Diagnostic Definitions", style={'marginTop': '0px'}),
-        html.Div(style={'fontSize': '13px', 'lineHeight': '1.6'}, children=[
-            html.P([html.B("1. Turning Point (AI*): "), "Peak TOPS / Peak Bandwidth. The boundary between Memory and Compute bound regions."]),
-            html.Ul([
-                html.Li([html.B("Compute Bound (🟢): "), "In the plateau region with >70% utilization. PE array is fully utilized."]),
-                html.Li([html.B("Memory Bound (🟢): "), "In the slope region with >70% utilization. DMA bandwidth is saturated."]),
-                html.Li([html.B("Compute Inefficient (🔴): "), "In the plateau but below threshold. Usually caused by small op dimensions or poor tiling."]),
-                html.Li([html.B("Memory Inefficient (🔴): "), "In the slope but below threshold. Caused by misalignment, large strides, or small DMA bursts."]),
-            ]),
-            html.Hr(style={'margin': '10px 0'}),
-            html.B("💡 Calculation Formulas:"),
-            html.Ul([
-                html.Li("Intensity (AI) = MACs / Total Bytes Moved"),
-                html.Li("Utilization = Actual TOPS / Theoretical Max at given AI"),
-                html.Li("Actual BW = Bytes Moved / Execution Time")
-            ])
+    definition_block = html.Div(style={'marginTop': '20px', 'padding': '10px', 'background': '#f8f9fa', 'borderRadius': '5px', 'border': '1px solid #ddd', 'fontSize': '12px'}, children=[
+        html.B("ℹ️ Quick Guide:"),
+        html.Ul(style={'paddingLeft': '20px', 'margin': '5px 0'}, children=[
+            html.Li("Roofline Eff: How close to the red line (Hardware Potential)."),
+            html.Li("Bandwidth Eff: Actual Bandwidth / Peak Bandwidth (Bus Saturation)."),
+            html.Li("Memory Eff: Ideal Bytes / Real Bytes (Software/Tiling Quality)."),
         ])
     ])
 
     if not click or not data: 
-        return [html.H3("Diagnostic Panel"), html.P("Click a node in the chart to view metrics."), definition_block]
+        return [html.H3("Detail Panel"), html.P("Select a node to view details."), definition_block]
     
     df_full = pd.DataFrame(data)
     idx = int(click['points'][0]['customdata'])
     row = df_full.iloc[idx]
     
+    # Analysis Logic
+    compute_gap_tops = row['real_ceiling'] - row['perf']
+    mem_waste_percent = 100 - row['data_eff']
+    is_wasteful = mem_waste_percent > 20 
+    
     return [
-        html.H2(row['name'], style={'color': row['status_color'], 'marginBottom': '0px'}),
-        html.Div(row['status'], style={'fontSize': '18px', 'fontWeight': 'bold', 'color': row['status_color'], 'marginBottom': '10px'}),
-        html.Hr(),
-        html.B("📊 Performance Metrics"),
+        # Header
+        html.H2(row['name'], style={'color': row['status_color'], 'marginBottom': '0px', 'fontSize': '20px'}),
+        html.Div(row['type'], style={'fontSize': '14px', 'color': '#666', 'marginBottom': '5px'}),
+        html.Div(row['status'], style={'fontSize': '16px', 'fontWeight': 'bold', 'color': row['status_color'], 'marginBottom': '15px'}),
+        
+        html.Hr(style={'margin': '10px 0'}),
+        
+        # Section 1: Efficiency Analysis
+        html.B("📉 Efficiency Analysis"),
         html.Table([
-            html.Tr([html.Td("Op Type:"), html.Td(html.B(row['type']))]),
-            html.Tr([html.Td("Actual Performance:"), html.Td(html.B(f"{row['perf']:.4f} TOPS"))]),
-            html.Tr([html.Td("Hardware Utilization:"), html.Td(html.B(f"{row['util']:.2f} %"))]),
-            html.Tr([html.Td("Arithmetic Intensity:"), html.Td(f"{row['ai']:.2f} MACs/B")]),
-        ], style={'width': '100%', 'lineHeight': '1.8'}),
-        html.Br(),
-        html.B("⚙️ Hardware Stats"),
+            html.Tr([
+                html.Td("Roofline Eff:"), 
+                html.Td([
+                    html.B(f"{row['util']:.1f}%"),
+                    html.Span(f" (Lost: {compute_gap_tops:.2f} TOPS)", style={'color': '#e74c3c', 'fontSize': '11px', 'marginLeft': '5px'}) if compute_gap_tops > 0.1 else None
+                ])
+            ]),
+            html.Tr([
+                html.Td("Bandwidth Eff:"), 
+                html.Td([
+                    html.B(f"{row['bw_eff']:.1f}%"),
+                ])
+            ]),
+            html.Tr([
+                html.Td("Memory Eff:"), 
+                html.Td([
+                    html.B(f"{row['data_eff']:.1f}%"),
+                    html.Span(" ⚠️ Waste", style={'color': '#e74c3c', 'fontWeight': 'bold', 'fontSize': '11px'}) if is_wasteful else html.Span(" ✅ Good", style={'color': 'green', 'fontSize': '11px'})
+                ])
+            ]),
+        ], style={'width': '100%', 'lineHeight': '1.8', 'marginBottom': '15px'}),
+
+        # Section 2: Physical Stats
+        html.B("⚙️ Physical Stats"),
         html.Table([
-            html.Tr([html.Td("Actual DMA Bandwidth:"), html.Td(html.B(f"{row['actual_bw']:.2f} GB/s"))]),
-            html.Tr([html.Td("Total MACs:"), html.Td(f"{row['macs']:.2e}")]),
-            html.Tr([html.Td("Total Bytes Moved:"), html.Td(f"{row['bytes']:.2e}")]),
-        ], style={'width': '100%', 'lineHeight': '1.8', 'fontSize': '14px', 'color': '#555'}),
-        html.Hr(),
-        html.B("📄 Raw Config:"),
-        html.Pre(json.dumps(row['raw'], indent=2), style={'background': '#2d3436', 'color': '#eee', 'padding': '10px', 'fontSize': '11px', 'marginTop': '15px'}),
+            html.Tr([html.Td("Bandwidth:"), html.Td(f"{row['actual_bw']:.2f} GB/s")]),
+            html.Tr([html.Td("Intensity (AI):"), html.Td(f"{row['ai_real']:.2f} MACs/Byte")]),
+            html.Tr([html.Td("Performance (Real):"), html.Td(f"{row['perf']:.2f} TOPS")]),
+            html.Tr([html.Td("Performance (Limit):"), html.Td(f"{row['real_ceiling']:.2f} TOPS")]),
+            html.Tr([html.Td("Traffic (Real):"), html.Td(format_bytes(row['real_bytes']))]),
+            html.Tr([html.Td("Traffic (Ideal):"), html.Td(format_bytes(row['theo_bytes']))]),
+        ], style={'width': '100%', 'lineHeight': '1.6', 'fontSize': '13px', 'color': '#333'}),
+
+        # Section 3: Debug Raw
+        html.Hr(style={'margin': '10px 0'}),
+        html.Details([
+            html.Summary("View Raw JSON", style={'cursor': 'pointer', 'fontSize': '12px'}),
+            html.Pre(json.dumps(row['raw'], indent=2), style={'background': '#eee', 'padding': '10px', 'fontSize': '10px', 'overflowX': 'auto'})
+        ]),
+        
         definition_block
     ]
 
-# Save Config Callback
+# G. Save Config
 @app.callback(
     Output('config-status', 'children'),
     Input('save-config-btn', 'n_clicks'),
-    [State('tops-input', 'value'), State('bw-input', 'value'),
-     State('mem-thresh-slider', 'value'), State('comp-thresh-slider', 'value')],
+    [State('tops-input', 'value'), State('bw-input', 'value'), State('mem-thresh-slider', 'value'), State('comp-thresh-slider', 'value')],
     prevent_initial_call=True
 )
-def save_config_callback(n_clicks, tops, bw, mem_t, comp_t):
-    new_cfg = {"peak_tops": tops, "mem_bw": bw, "mem_thresh": mem_t, "comp_thresh": comp_t}
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(new_cfg, f, indent=4)
-    return f"✅ Config Saved ({datetime.datetime.now().strftime('%H:%M:%S')})"
+def save_cfg(n, t, b, mt, ct):
+    with open(CONFIG_FILE, 'w') as f: json.dump({"peak_tops": t, "mem_bw": b, "mem_thresh": mt, "comp_thresh": ct}, f)
+    return f"✅ Saved at {datetime.datetime.now().strftime('%H:%M:%S')}"
 
 if __name__ == '__main__':
-    # Set timer to auto-open web page
     Timer(1.5, lambda: webbrowser.open('http://127.0.0.1:8050')).start()
     app.run(debug=False, port=8050)
